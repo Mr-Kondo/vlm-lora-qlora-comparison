@@ -2,6 +2,8 @@
 
 [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/Mr-Kondo/vlm-lora-qlora-comparison/blob/main/notebooks/vlm_lora_qlora_comparison.ipynb)
 
+*日本語版: [README.ja.md](README.ja.md)*
+
 A controlled comparison of three conditions on a vision-language model fine-tuned to convert receipt
 photographs into structured JSON:
 
@@ -251,6 +253,21 @@ Defaults worth knowing:
 
 Truncation and unsupervised examples are counted by the collator and reported in the artifacts, so
 silent target loss cannot go unnoticed.
+
+### Raising the image resolution
+
+Increasing `longest_edge` adds image tokens (measured, for a 960x1280 receipt):
+
+| `longest_edge` | Tiles | Prompt tokens | With the longest target (480) | Suggested `max_seq_length` |
+|---|---:|---:|---:|---:|
+| 768 (default) | 5 | 735 | 1,217 | 1536 |
+| 1152 | 10 | 1,191 | 1,673 | 2048 |
+| 1536 | 13 | 1,465 | 1,947 | 2048 |
+| 1920 | 21 | 2,194 | 2,676 | 3072 |
+
+Change the resolution **in `configs/base.yaml`**, not with a per-command `--set`: forgetting it on any
+one of the five commands would leave the preprocessing unmatched and break the comparison. Editing
+base.yaml propagates to every condition.
 
 ---
 
