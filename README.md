@@ -89,6 +89,27 @@ python scripts/evaluate.py --model-variant qlora --config configs/qlora.yaml
 python scripts/collect_results.py
 ```
 
+### Multi-seed study (recommended)
+
+A single run shows whether fine-tuning helps; it cannot tell you whether a small LoRA-vs-QLoRA gap
+is real. `scripts/run_experiment.py` runs the whole matrix across several seeds and compares the
+methods pairwise — both methods use the same seeds, so each seed yields one paired difference.
+
+```bash
+python scripts/run_experiment.py --seeds 42 43 44 --dry-run   # print the 15 steps
+python scripts/run_experiment.py --seeds 42 43 44 --smoke     # validate the plumbing, minutes
+python scripts/run_experiment.py --seeds 42 43 44             # the real study
+```
+
+It is orchestration only: it shells out to the same `train.py` and `evaluate.py` as above, writing
+into `<output_root>/seed<N>/`. A step whose artifact already exists is skipped, so an interrupted
+study (a reclaimed Colab session, say) resumes where it stopped; `--force` redoes everything. A
+failed step does not abort the rest — it is listed at the end and reported as N/A.
+
+Results land in `<output_root>/multiseed/` as mean ± sample standard deviation, plus the per-seed
+values. Sign agreement is reported instead of a p-value: with a handful of seeds, "QLoRA is behind
+in 3 of 3 seeds" is interpretable, while a significance test on three points is not.
+
 Rehearse the whole flow in a couple of minutes before committing to a real run:
 
 ```bash
@@ -215,6 +236,17 @@ outputs/
     └── loss_curves.json
 ```
 
+A multi-seed study nests that same layout under `<output_root>/seed<N>/` and adds:
+
+```
+outputs/multiseed/
+├── multiseed_comparison.json   per-metric mean/std/min/max, paired per-seed differences,
+│                               and the controlled-comparison check run for every seed
+├── multiseed_summary.csv       statistics plus the raw per-seed values
+├── multiseed_summary.md
+└── multiseed_loss_curves.json
+```
+
 `resource_metrics.json` follows this schema (extra keys are additive):
 
 ```json
@@ -276,11 +308,25 @@ base.yaml propagates to every condition.
 Both methods must fit the GPU for the comparison to mean anything. With the defaults the model is
 2.2 B parameters, sequences run to roughly 1 200 tokens, and gradient checkpointing is on.
 
-- 16 GB (T4) and up is the intended target; T4 has no bf16, so `compute_dtype: auto` selects fp16
-  for both methods.
+**The defaults target an A100/L4-class GPU**: `per_device_train_batch_size: 4` with
+`gradient_accumulation_steps: 2` (effective batch size 8, unchanged from batch 1 × 8) keeps the
+accelerator busy, which a 2.2 B model at batch 1 does not.
+
+| GPU | Notes |
+|---|---|
+| **A100 40 GB** | Recommended. bf16, and 1,555 GB/s of memory bandwidth — this workload is bandwidth-bound rather than compute-bound, so bandwidth matters more than peak TFLOPS |
+| **L4 22.5 GB** | Fine. bf16, but roughly 300 GB/s, so noticeably slower |
+| **T4 16 GB** | Works, but has no bf16 (falls back to fp16) and is slow. Add `--set training.per_device_train_batch_size=1 --set training.gradient_accumulation_steps=8` to **both** runs |
+
+VRAM is not the binding constraint at these defaults — even L4 has headroom. A100 is worth choosing
+for speed, not for capacity.
+
 - Expect roughly 1–2 hours for both training runs combined on an L4/A100, appreciably longer on a T4.
 - On CUDA OOM, lower `data.image.longest_edge` and `data.max_seq_length` — and apply the same change
   to **both** runs.
+- Keep `training.gradient_checkpointing: true`. Turning it off is faster but lets activation memory
+  dominate the peak, which **shrinks the apparent VRAM saving** of QLoRA — the very thing being
+  measured. If you do turn it off, turn it off for both methods and say so.
 
 ---
 
@@ -321,7 +367,7 @@ conversion since transformers 5 removed `warmup_ratio`).
 ```
 configs/       base.yaml + the two method configs that inherit it
 src/vlm_ft/    config, data, metrics, modeling, resources, report, seeding
-scripts/       download_model.py, train.py, evaluate.py, collect_results.py
+scripts/       download_model.py, train.py, evaluate.py, run_experiment.py, collect_results.py
 tests/         metric, config, report, notebook and CPU end-to-end tests
 notebooks/     the Colab comparison notebook
 ```

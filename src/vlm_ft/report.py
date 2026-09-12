@@ -8,7 +8,7 @@ comes back as ``None`` and is rendered as ``N/A``.
 from __future__ import annotations
 
 import os
-from typing import Any, Iterable
+from typing import Any, Iterable, Sequence
 
 from . import metrics as metrics_mod
 from .resources import BYTES_PER_GIB, format_duration, read_json
@@ -424,3 +424,218 @@ def load_loss_curves(output_root: str, variants: Iterable[str] = ("lora", "qlora
             ],
         }
     return curves
+
+
+# --------------------------------------------------------------------------
+# Multi-seed aggregation
+# --------------------------------------------------------------------------
+def seed_root(output_root: str, seed: int) -> str:
+    """Artifact root for one seed: ``<output_root>/seed<N>``."""
+    return os.path.join(output_root, f"seed{int(seed)}")
+
+
+def _stats(values: Iterable) -> dict:
+    """Mean / sample-std / min / max over the values that were measured.
+
+    ``std`` is ``None`` for a single observation rather than 0, so a one-seed
+    run cannot be mistaken for a zero-variance result.
+    """
+    clean = [
+        float(v) for v in values
+        if v is not None and not (isinstance(v, float) and v != v)
+    ]
+    count = len(clean)
+    if count == 0:
+        return {"n": 0, "mean": None, "std": None, "min": None, "max": None, "values": []}
+    mean = sum(clean) / count
+    std = (sum((x - mean) ** 2 for x in clean) / (count - 1)) ** 0.5 if count > 1 else None
+    return {"n": count, "mean": mean, "std": std, "min": min(clean), "max": max(clean),
+            "values": clean}
+
+
+def load_seed_runs(output_root: str, seeds: Sequence[int]) -> dict:
+    """Load every variant of every seed. Missing seeds are simply absent."""
+    runs = {}
+    for seed in seeds:
+        root = seed_root(output_root, seed)
+        if os.path.isdir(root):
+            runs[int(seed)] = load_all(root)
+    return runs
+
+
+def build_multi_seed_table(runs: dict) -> list[dict]:
+    """The comparison table with each cell replaced by across-seed statistics."""
+    rows = []
+    for key, label, higher_is_better, group in TABLE_ROWS:
+        row = {"key": key, "metric": label, "higher_is_better": higher_is_better, "group": group}
+        for variant in VARIANTS:
+            row[variant] = _stats(
+                _row_value(variants[variant], key, group) if variant in variants else None
+                for variants in runs.values()
+            )
+        rows.append(row)
+    return rows
+
+
+def paired_method_comparison(runs: dict, baseline: str = "lora", candidate: str = "qlora") -> dict:
+    """Per-seed ``candidate - baseline`` differences for each quality metric.
+
+    Both methods run on the same seeds, so the observations are paired and the
+    per-seed difference is the right unit of comparison.
+
+    Sign agreement is reported instead of a p-value: with a handful of seeds a
+    significance test would imply far more precision than the data supports,
+    whereas "3 of 3 seeds favour LoRA" is directly interpretable.
+    """
+    out: dict[str, Any] = {"baseline": baseline, "candidate": candidate, "metrics": {}}
+    for key, label, higher_is_better in metrics_mod.HEADLINE_METRICS:
+        per_seed = []
+        for seed in sorted(runs):
+            variants = runs[seed]
+            base_value = variants.get(baseline, {}).get("quality", {}).get(key)
+            cand_value = variants.get(candidate, {}).get("quality", {}).get(key)
+            if base_value is None or cand_value is None:
+                continue
+            difference = cand_value - base_value
+            if difference == 0:
+                winner = "tie"
+            elif (difference > 0) == bool(higher_is_better):
+                winner = candidate
+            else:
+                winner = baseline
+            per_seed.append({
+                "seed": seed, baseline: base_value, candidate: cand_value,
+                "difference": difference, "favours": winner,
+            })
+        differences = _stats(entry["difference"] for entry in per_seed)
+        out["metrics"][key] = {
+            "label": label,
+            "higher_is_better": higher_is_better,
+            "per_seed": per_seed,
+            "difference": differences,
+            "seeds_favouring_candidate": sum(1 for e in per_seed if e["favours"] == candidate),
+            "seeds_favouring_baseline": sum(1 for e in per_seed if e["favours"] == baseline),
+            "seeds_tied": sum(1 for e in per_seed if e["favours"] == "tie"),
+            "all_tied": bool(per_seed) and all(e["favours"] == "tie" for e in per_seed),
+            # Every seed pointing the same way is evidence of a direction. Every
+            # seed tying is the absence of one, so it is not "consistent".
+            "sign_is_consistent": (
+                bool(per_seed)
+                and len({e["favours"] for e in per_seed}) == 1
+                and per_seed[0]["favours"] != "tie"
+            ),
+        }
+    out["note"] = (
+        "Differences are candidate minus baseline on the raw metric. 'favours' accounts for "
+        "metric orientation (lower is better for CER, WER and loss). With few seeds, treat "
+        "sign consistency as the evidence, not the magnitude."
+    )
+    return out
+
+
+def multi_seed_controlled_check(runs: dict) -> dict:
+    """Run the per-seed controlled-comparison check across every seed."""
+    per_seed = {seed: check_controlled_comparison(variants) for seed, variants in sorted(runs.items())}
+    checked = {seed: result for seed, result in per_seed.items() if result.get("checked")}
+    gpus = sorted({
+        variants.get(method, {}).get("resources", {}).get("gpu_name")
+        for variants in runs.values()
+        for method in ("lora", "qlora")
+        if variants.get(method, {}).get("resources", {}).get("gpu_name")
+    })
+    return {
+        "per_seed": per_seed,
+        "seeds_checked": sorted(checked),
+        # None, not False: "could not be checked" is a different statement from
+        # "was checked and did not match".
+        "all_seeds_matched": (all(r["all_matched"] for r in checked.values()) if checked else None),
+        "failed_seeds": sorted(s for s, r in checked.items() if not r["all_matched"]),
+        "gpu_names_seen": gpus,
+        "same_gpu_across_seeds": len(gpus) <= 1,
+        "gpu_warning": None if len(gpus) <= 1 else (
+            "More than one GPU model was used across seeds, so pooled VRAM and training-time "
+            f"statistics are not comparable: {gpus}"
+        ),
+    }
+
+
+def format_stats(key: str, stats: dict) -> str:
+    """``mean ± std`` cell for the multi-seed markdown table."""
+    if not stats or stats.get("n", 0) == 0:
+        return "N/A"
+    mean_text = format_value(key, stats["mean"])
+    if stats.get("std") is None:
+        return f"{mean_text} (n=1)"
+    return f"{mean_text} ± {format_value(key, stats['std'])}"
+
+
+def render_multi_seed_markdown(table: list[dict], seeds: Sequence[int]) -> str:
+    seed_text = ", ".join(str(s) for s in seeds)
+    lines = [
+        f"Mean ± sample standard deviation over seeds {seed_text}.",
+        "",
+        "| Metric | BASE | LoRA | QLoRA |",
+        "|---|---:|---:|---:|",
+    ]
+    for row in table:
+        cells = " | ".join(format_stats(row["key"], row[v]) for v in VARIANTS)
+        lines.append(f"| {row['metric']} | {cells} |")
+    return "\n".join(lines)
+
+
+def render_multi_seed_csv(table: list[dict], seeds: Sequence[int]) -> str:
+    import csv
+    import io
+
+    buffer = io.StringIO()
+    writer = csv.writer(buffer)
+    header = ["key", "metric", "group", "higher_is_better"]
+    for variant in VARIANTS:
+        header += [f"{variant}_mean", f"{variant}_std", f"{variant}_min", f"{variant}_max", f"{variant}_n"]
+    header += [f"seed_{s}_lora" for s in seeds] + [f"seed_{s}_qlora" for s in seeds]
+    writer.writerow(header)
+    for row in table:
+        record = [row["key"], row["metric"], row["group"], row["higher_is_better"]]
+        for variant in VARIANTS:
+            stats = row[variant]
+            record += [
+                "" if stats["mean"] is None else stats["mean"],
+                "" if stats["std"] is None else stats["std"],
+                "" if stats["min"] is None else stats["min"],
+                "" if stats["max"] is None else stats["max"],
+                stats["n"],
+            ]
+        # raw per-seed values, so the spread can be inspected directly
+        for variant in ("lora", "qlora"):
+            values = row[variant]["values"]
+            record += list(values) + [""] * (len(seeds) - len(values))
+        writer.writerow(record)
+    return buffer.getvalue()
+
+
+def build_multi_seed_comparison(output_root: str, seeds: Sequence[int]) -> dict:
+    """Everything the notebook needs for the multi-seed view."""
+    seeds = [int(s) for s in seeds]
+    runs = load_seed_runs(output_root, seeds)
+    table = build_multi_seed_table(runs)
+    return {
+        "output_root": output_root,
+        "seeds_requested": seeds,
+        "seeds_found": sorted(runs),
+        "seeds_missing": [s for s in seeds if s not in runs],
+        "per_seed_roots": {s: seed_root(output_root, s) for s in seeds},
+        "table": table,
+        "paired_lora_vs_qlora": paired_method_comparison(runs),
+        "controlled_comparison": multi_seed_controlled_check(runs),
+        "markdown_table": render_multi_seed_markdown(table, sorted(runs)),
+        "documented_differences": list(DOCUMENTED_DIFFERENCES),
+    }
+
+
+def load_multi_seed_loss_curves(output_root: str, seeds: Sequence[int]) -> dict:
+    """``{seed: {method: {train, eval}}}``. BASE is excluded: it is never trained."""
+    return {
+        int(seed): load_loss_curves(seed_root(output_root, seed))
+        for seed in seeds
+        if os.path.isdir(seed_root(output_root, seed))
+    }

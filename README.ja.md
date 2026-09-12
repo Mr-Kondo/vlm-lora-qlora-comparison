@@ -75,6 +75,20 @@ python scripts/evaluate.py --model-variant qlora --config configs/qlora.yaml
 python scripts/collect_results.py
 ```
 
+### 複数シードでの実験（推奨）
+
+単一の実行ではファインチューニングが効くかは分かりますが、LoRA と QLoRA のわずかな差が本物かは判定できません。`scripts/run_experiment.py` は実験マトリクス全体を複数シードで実行し、2手法を**対応のある比較**（paired comparison）で評価します。両手法が同じシード列を使うため、シード毎に1つの差分が得られます。
+
+```bash
+python scripts/run_experiment.py --seeds 42 43 44 --dry-run   # 15 ステップを表示するだけ
+python scripts/run_experiment.py --seeds 42 43 44 --smoke     # 配管の検証、数分
+python scripts/run_experiment.py --seeds 42 43 44             # 本番
+```
+
+これはオーケストレーションだけを行います。上記と同じ `train.py` と `evaluate.py` を呼び出し、`<output_root>/seed<N>/` に書き出します。成果物が既に存在するステップはスキップするため、中断した実験（Colab のセッション回収など）は途中から再開できます。`--force` で全部やり直せます。1ステップが失敗しても残りは止まらず、最後に失敗一覧が表示され、その値は N/A として報告されます。
+
+結果は `<output_root>/multiseed/` に、平均 ± 標本標準偏差とシード毎の生値として出力されます。p 値ではなく**符号の一致**を報告します。数シードしかない状況では「3シード中3シードで QLoRA が劣る」は解釈できますが、3点からの有意性検定は解釈できないためです。
+
 本番実行前に数分で全体を通すには:
 
 ```bash
@@ -176,6 +190,17 @@ outputs/
     └── loss_curves.json
 ```
 
+複数シードの実験では、同じレイアウトが `<output_root>/seed<N>/` の下に入れ子になり、次が追加されます。
+
+```
+outputs/multiseed/
+├── multiseed_comparison.json   メトリクス毎の平均/標準偏差/最小/最大、シード毎の対応差分、
+│                               全シードに対する統制比較チェック
+├── multiseed_summary.csv       統計量とシード毎の生値
+├── multiseed_summary.md
+└── multiseed_loss_curves.json
+```
+
 `resource_metrics.json` は次のスキーマに従います（追加キーは加算的）。
 
 ```json
@@ -233,9 +258,19 @@ python scripts/train.py --method lora \
 
 比較が意味を持つには、両手法が GPU に載る必要があります。既定設定ではモデルは 2.2 B パラメータ、系列長は約 1,200 トークン、gradient checkpointing は有効です。
 
-- 16 GB（T4）以上を想定しています。T4 は bf16 非対応のため、`compute_dtype: auto` は両手法で fp16 を選びます。
+**既定値は A100 / L4 クラスの GPU を想定しています。** `per_device_train_batch_size: 4` と `gradient_accumulation_steps: 2`（実効バッチサイズは 8 のままで、batch 1 × 8 と同一）により、batch 1 では遊んでしまうアクセラレータを使い切ります。
+
+| GPU | 備考 |
+|---|---|
+| **A100 40 GB** | 推奨。bf16 が使え、メモリ帯域 1,555 GB/s。この処理は演算律速ではなく**帯域律速**なので、ピーク TFLOPS より帯域が効きます |
+| **L4 22.5 GB** | 問題なし。bf16 は使えますが帯域は約 300 GB/s なので明確に遅くなります |
+| **T4 16 GB** | 動きますが bf16 非対応（fp16 にフォールバック）かつ低速。`--set training.per_device_train_batch_size=1 --set training.gradient_accumulation_steps=8` を**両方の実行に**追加してください |
+
+この既定値では VRAM は制約になりません。L4 でも余裕があります。A100 を選ぶ理由は容量ではなく**速度**です。
+
 - L4/A100 で2手法あわせて 1〜2 時間程度、T4 ではかなり長くなります。
 - CUDA OOM が出たら `data.image.longest_edge` と `data.max_seq_length` を下げてください。同じ変更を**両方の実行に**適用すること。
+- `training.gradient_checkpointing: true` は維持してください。無効にすると速くなりますが、活性値メモリがピークを支配するようになり、**QLoRA の VRAM 削減が実際より小さく見えます**。これは測定対象そのものです。無効にする場合は両手法で無効にし、その旨を明記してください。
 
 ---
 
@@ -263,7 +298,7 @@ pytest -q
 ```
 configs/       base.yaml と、それを継承する2つの手法設定
 src/vlm_ft/    config, data, metrics, modeling, resources, report, seeding
-scripts/       download_model.py, train.py, evaluate.py, collect_results.py
+scripts/       download_model.py, train.py, evaluate.py, run_experiment.py, collect_results.py
 tests/         メトリクス・設定・レポート・ノートブック・CPU エンドツーエンドのテスト
 notebooks/     Colab 比較ノートブック
 ```

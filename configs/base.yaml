@@ -62,9 +62,15 @@ training:
   num_train_epochs: 2
   # -1 = run the full epoch schedule. Set to a small int for a smoke test.
   max_steps: -1
-  per_device_train_batch_size: 1
-  gradient_accumulation_steps: 8      # effective batch size = 8
-  per_device_eval_batch_size: 1
+  # Tuned for an A100/L4-class GPU: batch 4 keeps the accelerator busy, which a
+  # 2.2 B model at batch 1 does not. The effective batch size is unchanged at 8,
+  # so the optimization schedule is the same as at batch 1 x 8.
+  # On a 16 GB card (T4) use: --set training.per_device_train_batch_size=1
+  #                           --set training.gradient_accumulation_steps=8
+  # applying the same change to BOTH methods.
+  per_device_train_batch_size: 4
+  gradient_accumulation_steps: 2      # effective batch size = 8
+  per_device_eval_batch_size: 4
   learning_rate: 2.0e-4
   lr_scheduler_type: cosine
   # warmup_ratio is converted to a concrete step count by scripts/train.py
@@ -120,5 +126,9 @@ generation:
   num_beams: 1
 
 evaluation:
+  # Deliberately 1, unlike training. Batched generation pads the prompt, which
+  # perturbs the numerics slightly; at batch 1 every variant is decoded under
+  # identical conditions. That matters when the point is to resolve small
+  # quality differences between LoRA and QLoRA across seeds.
   batch_size: 1
   compute_eval_loss: true
