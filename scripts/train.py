@@ -195,6 +195,9 @@ def main(argv=None) -> int:
     LOGGER.info("method=%s (%s)", spec.name, spec.description)
     LOGGER.info("config=%s output=%s", config_path, output_dir)
 
+    # Before downloading or loading anything multi-gigabyte.
+    modeling.run_preflight_checks()
+
     set_global_seed(int(cfg.experiment.seed))
 
     gpu = resources.gpu_info()

@@ -98,6 +98,60 @@ def validate_method_against_config(method: str, cfg) -> MethodSpec:
 
 
 # --------------------------------------------------------------------------
+# Environment preflight
+# --------------------------------------------------------------------------
+def check_peft_dispatch_compatibility() -> list[str]:
+    """Detect installed-but-incompatible optional deps that break LoRA injection.
+
+    PEFT walks a list of dispatchers for every module it wraps, and one of them
+    calls ``is_torchao_available()``. That helper *raises* ImportError on an
+    out-of-range torchao version instead of returning False, so an old torchao
+    makes ``get_peft_model`` fail for every module type -- even though this
+    project never touches torchao (4-bit goes through bitsandbytes).
+
+    Colab preinstalls torchao pinned to its torch build, which is exactly the
+    situation that triggers it. Probing the real call here rather than
+    re-implementing the version comparison means this stays correct if PEFT
+    changes its bounds, and it fails in a second instead of after a multi-GB
+    model load.
+    """
+    problems: list[str] = []
+    try:
+        from peft.import_utils import is_torchao_available
+    except Exception:  # pragma: no cover - peft layout changed; let training surface it
+        return problems
+
+    try:
+        is_torchao_available()
+    except ImportError as exc:
+        problems.append(
+            f"peft cannot inject LoRA adapters in this environment: {exc}\n"
+            "  peft probes torchao for every module it wraps, and that probe raises rather "
+            "than returning False.\n"
+            "  This project does not use torchao (4-bit quantization goes through "
+            "bitsandbytes), so removing it is the minimal fix:\n"
+            "      pip uninstall -y torchao\n"
+            "  Upgrading it to a version peft accepts also works, but on Colab that can pull "
+            "a torch build\n"
+            "  that does not match the runtime."
+        )
+    return problems
+
+
+def run_preflight_checks() -> None:
+    """Fail fast on environment problems that would break the run downstream."""
+    problems = check_peft_dispatch_compatibility()
+    if not problems:
+        return
+    for problem in problems:
+        LOGGER.error("%s", problem)
+    raise SystemExit(
+        "environment preflight failed; apply the fix above and re-run "
+        f"({len(problems)} problem(s) found)"
+    )
+
+
+# --------------------------------------------------------------------------
 # dtype / paths / revisions
 # --------------------------------------------------------------------------
 def resolve_compute_dtype(name: str | None):

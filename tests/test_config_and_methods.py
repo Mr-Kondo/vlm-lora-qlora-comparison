@@ -118,3 +118,51 @@ def test_target_modules_digest_is_order_independent():
     a = ["m.layers.0.q_proj", "m.layers.1.k_proj"]
     assert modeling.target_modules_digest(a) == modeling.target_modules_digest(list(reversed(a)))
     assert modeling.target_modules_digest(a) != modeling.target_modules_digest(a + ["m.lm_head"])
+
+
+# ------------------------------------------------------- environment preflight
+def test_preflight_passes_when_torchao_probe_is_happy(monkeypatch):
+    """A cooperative probe (installed-and-ok, or absent) must not block a run."""
+    import peft.import_utils
+
+    for result in (True, False):
+        monkeypatch.setattr(peft.import_utils, "is_torchao_available", lambda: result)
+        assert modeling.check_peft_dispatch_compatibility() == []
+        modeling.run_preflight_checks()
+
+
+def test_preflight_detects_an_incompatible_torchao(monkeypatch):
+    """peft raises rather than returning False, which breaks all LoRA injection."""
+    import peft.import_utils
+
+    def raiser():
+        raise ImportError(
+            "Found an incompatible version of torchao. Found version 0.10.0, "
+            "but only versions above 0.16.0 are supported"
+        )
+
+    monkeypatch.setattr(peft.import_utils, "is_torchao_available", raiser)
+    problems = modeling.check_peft_dispatch_compatibility()
+    assert len(problems) == 1
+    assert "0.10.0" in problems[0]
+    # the message must carry the actual remedy, not just the symptom
+    assert "pip uninstall -y torchao" in problems[0]
+    assert "bitsandbytes" in problems[0]
+
+    with pytest.raises(SystemExit, match="environment preflight failed"):
+        modeling.run_preflight_checks()
+
+
+def test_preflight_survives_a_peft_layout_change(monkeypatch):
+    """If the probe cannot be imported at all, let training surface the problem."""
+    import builtins
+
+    real_import = builtins.__import__
+
+    def fake_import(name, *args, **kwargs):
+        if name == "peft.import_utils":
+            raise ImportError("moved")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", fake_import)
+    assert modeling.check_peft_dispatch_compatibility() == []

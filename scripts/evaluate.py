@@ -171,6 +171,10 @@ def main(argv=None) -> int:
             f"run: python scripts/train.py --method {variant}"
         )
 
+    if variant != "base":
+        # BASE loads no adapter, so the peft dispatch path is not exercised.
+        modeling.run_preflight_checks()
+
     set_global_seed(int(cfg.experiment.seed))
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     compute_dtype = modeling.resolve_compute_dtype(cfg.model.get("compute_dtype"))

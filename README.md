@@ -42,6 +42,19 @@ nothing to upload. Then:
 to the runtime's CUDA build. If imports complain after the install cell, use
 **Runtime → Restart session**, then re-run from the version-check cell (skip the install).
 
+**One preinstalled package has to go.** Colab ships `torchao` pinned to its torch build, and peft
+probes torchao for every module it wraps — a probe that *raises* on an out-of-range version instead
+of returning False. So an old torchao breaks LoRA injection entirely, even though this project never
+uses torchao (4-bit goes through bitsandbytes). The notebook has a cell that detects and removes it;
+outside the notebook:
+
+```bash
+pip uninstall -y torchao
+```
+
+`train.py` and `evaluate.py` check for this before loading anything multi-gigabyte and print the fix,
+rather than failing minutes later inside peft.
+
 **Run a smoke test before the real thing.** Append this to a training cell to exercise the whole
 flow in a couple of minutes, then remove it:
 
