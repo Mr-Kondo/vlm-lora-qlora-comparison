@@ -1,0 +1,22 @@
+# Runtime dependencies for the BASE / LoRA / QLoRA comparison.
+#
+# torch and torchvision are intentionally NOT pinned here: on Colab they ship
+# preinstalled and matched to the runtime's CUDA build, and reinstalling them
+# is slow and can break that match. Install them yourself only on a bare host.
+#
+# Verified end-to-end against the versions in the trailing comments.
+
+transformers>=4.46,<6          # verified: 5.17.0
+peft>=0.13                     # verified: 0.20.0
+datasets>=3.0                  # verified: 5.0.1
+accelerate>=1.0                # verified: 1.15.0
+huggingface_hub>=0.26          # verified: 1.31.0
+bitsandbytes>=0.43             # QLoRA only; requires a CUDA GPU
+pillow>=10.0                   # verified: 12.3.0
+PyYAML>=6.0                    # verified: 6.0.3
+numpy>=1.26                    # verified: 2.5.3
+Levenshtein>=0.25              # optional CER/WER accelerator; pure-Python fallback exists
+
+# Notebook / reporting
+pandas>=2.0
+matplotlib>=3.7

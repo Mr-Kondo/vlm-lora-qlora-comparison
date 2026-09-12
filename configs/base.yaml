@@ -1,0 +1,124 @@
+# Shared configuration for the BASE / LoRA / QLoRA comparison.
+#
+# configs/lora.yaml and configs/qlora.yaml both inherit from this file and
+# override ONLY method-specific keys. Everything that could confound the
+# LoRA-vs-QLoRA comparison is defined here exactly once.
+
+experiment:
+  name: cord-v2-smolvlm
+  seed: 42
+  output_root: outputs
+
+model:
+  # Base VLM shared by all three conditions (BASE, LoRA, QLoRA).
+  id: HuggingFaceTB/SmolVLM-Instruct
+  # Pin a commit SHA for strict reproducibility. `main` is resolved to a
+  # concrete SHA at run time and recorded in the run artifacts.
+  revision: main
+  # Populated by scripts/download_model.py so training never re-downloads.
+  local_dir: null
+  attn_implementation: sdpa
+  # auto -> bfloat16 when the GPU supports it, else float16.
+  # Used as the training dtype for LoRA and as bnb_4bit_compute_dtype for QLoRA.
+  compute_dtype: auto
+
+data:
+  dataset_id: naver-clova-ix/cord-v2
+  dataset_revision: null
+  train_split: train
+  validation_split: validation
+  test_split: test
+  # null = use the full split. Set to an int for quick runs.
+  max_train_samples: null
+  # Validation is run several times during training; capping it keeps the
+  # in-training evaluation cost (which is measured and reported separately
+  # from training time) small and identical for both methods.
+  max_eval_samples: 50
+  max_test_samples: null
+  image:
+    # Images are resized so the longest edge is at most this many pixels
+    # before SmolVLM's tiling. 768 = 2x2 tiles + 1 global tile = 405 image
+    # tokens, which keeps the sequence short enough for a 16 GB GPU.
+    longest_edge: 768
+    do_image_splitting: true
+  # Hard cap on the tokenized prompt+target length. Truncation is counted and
+  # reported so silent target loss cannot go unnoticed.
+  max_seq_length: 1536
+
+prompt:
+  instruction: |-
+    You are a receipt parsing system. Extract the contents of the receipt image as a single JSON object.
+
+    Rules:
+    - Output only the JSON object. No explanation and no markdown code fences.
+    - Use only these top-level keys, and only when the receipt contains them: "menu", "sub_total", "total", "void_menu".
+    - "menu" and "void_menu" are lists of line-item objects. Item keys include: "nm", "num", "cnt", "unitprice", "price", "discountprice", "itemsubtotal", "sub_nm", "sub_cnt", "sub_unitprice", "sub_price", "etc".
+    - "sub_total" keys include: "subtotal_price", "discount_price", "service_price", "othersvc_price", "tax_price", "etc".
+    - "total" keys include: "total_price", "cashprice", "changeprice", "creditcardprice", "emoneyprice", "menutype_cnt", "menuqty_cnt", "total_etc".
+    - Every value is a string copied verbatim from the receipt, keeping the original digit grouping and punctuation.
+    - Sort the keys of every object alphabetically.
+
+training:
+  num_train_epochs: 2
+  # -1 = run the full epoch schedule. Set to a small int for a smoke test.
+  max_steps: -1
+  per_device_train_batch_size: 1
+  gradient_accumulation_steps: 8      # effective batch size = 8
+  per_device_eval_batch_size: 1
+  learning_rate: 2.0e-4
+  lr_scheduler_type: cosine
+  # warmup_ratio is converted to a concrete step count by scripts/train.py
+  # (transformers 5 removed the ratio argument). Set warmup_steps to override.
+  warmup_ratio: 0.03
+  warmup_steps: 0
+  weight_decay: 0.0
+  max_grad_norm: 1.0
+  # Kept identical for both methods on purpose. Only adapter weights are
+  # trained, so optimizer state is small enough that QLoRA does not need
+  # paged/8-bit optimizers; using the same optimizer removes a confound.
+  optim: adamw_torch
+  logging_steps: 5
+  eval_strategy: steps
+  eval_steps: 25
+  save_strategy: "no"
+  gradient_checkpointing: true
+  dataloader_num_workers: 2
+  report_to: []
+
+lora:
+  r: 16
+  alpha: 32
+  dropout: 0.05
+  bias: none
+  # Target modules are resolved against the *instantiated* model by matching
+  # these leaf names inside `target_scope`, then passed to PEFT as explicit
+  # fully-qualified names. The resolved list is recorded in the run artifacts
+  # so LoRA and QLoRA can be verified to have targeted the same modules.
+  target_modules_suffixes:
+    - q_proj
+    - k_proj
+    - v_proj
+    - o_proj
+    - gate_proj
+    - up_proj
+    - down_proj
+  # text_model = language decoder only (vision tower stays frozen); all = every
+  # matching Linear in the model.
+  target_scope: text_model
+
+quantization:
+  load_in_4bit: false
+  bnb_4bit_quant_type: nf4
+  bnb_4bit_use_double_quant: true
+  # auto -> follows model.compute_dtype, so LoRA and QLoRA compute in the
+  # same dtype and differ only in how base weights are stored.
+  bnb_4bit_compute_dtype: auto
+
+generation:
+  max_new_tokens: 512
+  do_sample: false
+  num_beams: 1
+
+evaluation:
+  batch_size: 1
+  compute_eval_loss: true

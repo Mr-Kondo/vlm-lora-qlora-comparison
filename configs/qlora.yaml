@@ -1,0 +1,10 @@
+# QLoRA: the SAME base model loaded with 4-bit NF4 double quantization, then
+# prepared for k-bit training, with an otherwise identical LoRA adapter.
+extends: base.yaml
+method: qlora
+
+quantization:
+  load_in_4bit: true
+  bnb_4bit_quant_type: nf4
+  bnb_4bit_use_double_quant: true
+  bnb_4bit_compute_dtype: auto

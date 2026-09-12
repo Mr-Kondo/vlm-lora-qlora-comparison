@@ -1,0 +1,6 @@
+# LoRA: base weights kept in the 16-bit compute dtype, LoRA adapters trained.
+extends: base.yaml
+method: lora
+
+quantization:
+  load_in_4bit: false
