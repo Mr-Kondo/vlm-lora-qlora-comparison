@@ -17,11 +17,14 @@ def _notebook():
 
 
 def _code_sources(nb):
-    return ["\n".join(c["source"]) for c in nb["cells"] if c["cell_type"] == "code"]
+    # Plain concatenation, exactly how Jupyter and Colab reconstruct a cell.
+    # Joining with "\n" instead would paper over missing line terminators in the
+    # source arrays and let a notebook that cannot run at all pass these tests.
+    return ["".join(c["source"]) for c in nb["cells"] if c["cell_type"] == "code"]
 
 
 def _all_source(nb):
-    return "\n".join("\n".join(c["source"]) for c in nb["cells"])
+    return "\n".join("".join(c["source"]) for c in nb["cells"])
 
 
 def test_notebook_is_valid_nbformat():
@@ -31,6 +34,30 @@ def test_notebook_is_valid_nbformat():
     for cell in nb["cells"]:
         assert cell["cell_type"] in ("code", "markdown")
         assert isinstance(cell["source"], list)
+
+
+def test_source_lines_are_newline_terminated():
+    """Every line but the last must end with "\\n".
+
+    nbformat stores a cell as a list of lines that the client concatenates
+    verbatim. Without the terminators every cell collapses onto one line and
+    Colab raises SyntaxError on the first multi-line cell.
+    """
+    nb = _notebook()
+    offenders = []
+    for index, cell in enumerate(nb["cells"]):
+        for line_no, line in enumerate(cell["source"][:-1]):
+            if not line.endswith("\n"):
+                offenders.append((index, line_no, line[:60]))
+    assert not offenders, f"{len(offenders)} line(s) missing a terminator, e.g. {offenders[:3]}"
+
+
+def test_multi_line_cells_survive_concatenation():
+    """A cell with several statements must still read as several lines."""
+    nb = _notebook()
+    for index, source in enumerate(_code_sources(nb)):
+        if len(source) > 120:
+            assert "\n" in source, f"code cell {index} concatenated into a single line"
 
 
 def test_every_code_cell_parses():
